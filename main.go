@@ -116,7 +116,7 @@ func buildMailHandler(adanosServer []string, adanosToken string, tags []string, 
 
 		mailContent := MailContent{
 			Origin:  origin.String(),
-			ID:      msgID,
+			ID:      strings.Trim(msgID, "<>"),
 			Subject: msg.Header.Get("Subject"),
 			From:    from,
 			To:      to,

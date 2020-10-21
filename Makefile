@@ -6,6 +6,9 @@ LDFLAGS := -s -w -X main.Version=$(Version) -X main.GitCommit=$(GitCommit)
 run: build
 	./build/debug/adanos-mail-connector
 
+run-md: build
+	./build/debug/adanos-mail-connector --html2markdown
+
 build:
 	go build -race -ldflags "$(LDFLAGS)" -o build/debug/adanos-mail-connector main.go
 
