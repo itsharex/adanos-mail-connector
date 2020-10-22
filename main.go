@@ -50,8 +50,13 @@ func main() {
 				Usage: "SMTP 服务器监听地址",
 			},
 			&cli.BoolFlag{
-				Name:  "html2markdown",
+				Name:  "html2md",
 				Usage: "是否将 HTML 内容转换为 Markdown",
+			},
+			&cli.StringFlag{
+				Name:  "origin",
+				Value: "adanos-mail-connector",
+				Usage: "Adanos 事件来源标识",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -62,7 +67,8 @@ func main() {
 
 			adanosToken := c.String("adanos-token")
 			tags := c.StringSlice("tag")
-			html2markdown := c.Bool("html2markdown")
+			html2markdown := c.Bool("html2md")
+			origin := c.String("origin")
 
 			log.WithFields(log.Fields{
 				"version": Version,
@@ -71,7 +77,7 @@ func main() {
 
 			return smtpd.ListenAndServe(
 				c.String("smtp-listen"),
-				buildMailHandler(adanosServers, adanosToken, tags, html2markdown),
+				buildMailHandler(adanosServers, adanosToken, tags, origin, html2markdown),
 				"mail-handler",
 				"",
 			)
@@ -84,8 +90,8 @@ func main() {
 	}
 }
 
-func buildMailHandler(adanosServer []string, adanosToken string, tags []string, html2markdown bool) func(origin net.Addr, from string, to []string, data []byte) {
-	alerter := buildAdanosAlerter(adanosServer, adanosToken, tags)
+func buildMailHandler(adanosServer []string, adanosToken string, tags []string, origin string, html2markdown bool) func(origin net.Addr, from string, to []string, data []byte) {
+	alerter := buildAdanosAlerter(adanosServer, adanosToken, tags, origin)
 	return func(origin net.Addr, from string, to []string, data []byte) {
 		msg, err := mail.ReadMessage(bytes.NewReader(data))
 		if err != nil {
@@ -146,7 +152,7 @@ type MailContent struct {
 	Links   map[string]string `json:"links"`
 }
 
-func buildAdanosAlerter(adanosServers []string, adanosToken string, tags []string) func(mailContent MailContent) error {
+func buildAdanosAlerter(adanosServers []string, adanosToken string, tags []string, origin string) func(mailContent MailContent) error {
 	adanosConn := connector.NewConnector(adanosToken, adanosServers...)
 
 	return func(mailContent MailContent) error {
@@ -157,7 +163,7 @@ func buildAdanosAlerter(adanosServers []string, adanosToken string, tags []strin
 			WithMeta("mail-to", mailContent.To).
 			WithMeta("mail-origin", mailContent.Origin).
 			WithMeta("mail-links", mailContent.Links).
-			WithOrigin("adanos-mail-receiver").
+			WithOrigin(origin).
 			WithTags(tags...)
 
 		ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
@@ -173,9 +179,6 @@ func extractLinks(body string) map[string]string {
 		log.Errorf("ERROR: create body dom object failed: %v", err)
 		return links
 	}
-
-	title := doc.Find("h2").First().Text()
-	log.Debugf("Title: %v", title)
 
 	doc.Find("a").Each(func(i int, s *goquery.Selection) {
 		linkURL := s.AttrOr("href", "")
