@@ -84,7 +84,7 @@ func main() {
 				"git":     GitCommit,
 			}).Debugf("adanos-mail-connector started")
 
-			return smtpd.ListenAndServe(
+			return createSMTPServer(
 				c.String("smtp-listen"),
 				buildMailHandler(adanosServers, adanosToken, tags, origin, html2markdown, excludeFilter),
 				"mail-handler",
@@ -97,6 +97,16 @@ func main() {
 		log.Errorf("error: %v", err)
 		panic(err)
 	}
+}
+
+// createSMTPServer create a SMTP Server
+func createSMTPServer(addr string, handler smtpd.Handler, appname string, hostname string) error {
+	server := &smtpd.Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
+	server.AuthHandler = func(remoteAddr net.Addr, mechanism string, username, password, shared []byte) (bool, error) {
+		return true, nil
+	}
+
+	return server.ListenAndServe()
 }
 
 // buildFilters 创建转发规则过滤器
