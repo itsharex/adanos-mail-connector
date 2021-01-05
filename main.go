@@ -18,7 +18,9 @@ import (
 	"github.com/mhale/smtpd"
 	"github.com/mylxsw/adanos-alert/pkg/connector"
 	"github.com/mylxsw/asteria/log"
+	"github.com/mylxsw/pattern"
 	"github.com/urfave/cli"
+	"gopkg.in/yaml.v2"
 )
 
 var Version = "1.0"
@@ -58,6 +60,11 @@ func main() {
 				Value: "adanos-mail-connector",
 				Usage: "Adanos 事件来源标识",
 			},
+			&cli.StringFlag{
+				Name:  "exclude-fliters",
+				Usage: "邮件排除规则配置文件，格式为 YAML",
+				Value: "",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			adanosServers := c.StringSlice("adanos-server")
@@ -70,6 +77,8 @@ func main() {
 			html2markdown := c.Bool("html2md")
 			origin := c.String("origin")
 
+			excludeFilter := buildExcludeFilters(c.String("exclude-fliters"))
+
 			log.WithFields(log.Fields{
 				"version": Version,
 				"git":     GitCommit,
@@ -77,7 +86,7 @@ func main() {
 
 			return smtpd.ListenAndServe(
 				c.String("smtp-listen"),
-				buildMailHandler(adanosServers, adanosToken, tags, origin, html2markdown),
+				buildMailHandler(adanosServers, adanosToken, tags, origin, html2markdown, excludeFilter),
 				"mail-handler",
 				"",
 			)
@@ -90,7 +99,52 @@ func main() {
 	}
 }
 
-func buildMailHandler(adanosServer []string, adanosToken string, tags []string, origin string, html2markdown bool) func(origin net.Addr, from string, to []string, data []byte) {
+// buildExcludeFilters 创建排除规则过滤器
+func buildExcludeFilters(conf string) func(data MailContent) bool {
+	if conf == "" {
+		return func(data MailContent) bool {
+			return false
+		}
+	}
+
+	confData, err := ioutil.ReadFile(conf)
+	if err != nil {
+		panic(err)
+	}
+
+	var filters []ExcludeFilter
+	if err := yaml.Unmarshal(confData, &filters); err != nil {
+		panic(err)
+	}
+
+	return func(data MailContent) bool {
+		for _, filter := range filters {
+			matched, err := pattern.Match(filter.Expr, data)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"data":   data,
+					"filter": filter,
+				}).Errorf("pattern matche failed: %v", err)
+				continue
+			}
+
+			if matched {
+				return true
+			}
+		}
+
+		return false
+	}
+}
+
+// ExcludeFilter 排除过滤器
+type ExcludeFilter struct {
+	Name string `yaml:"name,omitempty"`
+	Expr string `yaml:"expr"`
+}
+
+// buildMailHandler 创建邮件处理器
+func buildMailHandler(adanosServer []string, adanosToken string, tags []string, origin string, html2markdown bool, excludeFilter func(data MailContent) bool) func(origin net.Addr, from string, to []string, data []byte) {
 	alerter := buildAdanosAlerter(adanosServer, adanosToken, tags, origin)
 	return func(origin net.Addr, from string, to []string, data []byte) {
 		msg, err := mail.ReadMessage(bytes.NewReader(data))
@@ -129,6 +183,11 @@ func buildMailHandler(adanosServer []string, adanosToken string, tags []string, 
 			Links:   extractLinks(string(body)),
 		}
 
+		if excludeFilter(mailContent) {
+			log.With(mailContent).Debug("event was dropped because exclude filter matched")
+			return
+		}
+
 		if html2markdown {
 			mailContent.Body = formatAsMarkdown(string(body))
 		} else {
@@ -142,7 +201,9 @@ func buildMailHandler(adanosServer []string, adanosToken string, tags []string, 
 	}
 }
 
+// MailContent 邮件内容对象
 type MailContent struct {
+	pattern.Helpers
 	ID      string            `json:"id"`
 	Origin  string            `json:"origin"`
 	Subject string            `json:"subject"`
@@ -152,6 +213,7 @@ type MailContent struct {
 	Links   map[string]string `json:"links"`
 }
 
+// buildAdanosAlerter 创建报警
 func buildAdanosAlerter(adanosServers []string, adanosToken string, tags []string, origin string) func(mailContent MailContent) error {
 	adanosConn := connector.NewConnector(adanosToken, adanosServers...)
 
@@ -190,6 +252,7 @@ func extractLinks(body string) map[string]string {
 	return links
 }
 
+// formatAsMarkdown 将 html 格式化为 Markdown 格式
 func formatAsMarkdown(html string) string {
 	converter := md.NewConverter("", true, nil)
 	converter.Use(plugin.GitHubFlavored())
