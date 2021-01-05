@@ -61,8 +61,8 @@ func main() {
 				Usage: "Adanos 事件来源标识",
 			},
 			&cli.StringFlag{
-				Name:  "exclude-fliters",
-				Usage: "邮件排除规则配置文件，格式为 YAML",
+				Name:  "fliters",
+				Usage: "邮件转发规则配置文件，格式为 YAML，如果没有指定规则，则默认为全部转发",
 				Value: "",
 			},
 		},
@@ -77,7 +77,7 @@ func main() {
 			html2markdown := c.Bool("html2md")
 			origin := c.String("origin")
 
-			excludeFilter := buildExcludeFilters(c.String("exclude-fliters"))
+			excludeFilter := buildFilters(c.String("fliters"))
 
 			log.WithFields(log.Fields{
 				"version": Version,
@@ -99,11 +99,11 @@ func main() {
 	}
 }
 
-// buildExcludeFilters 创建排除规则过滤器
-func buildExcludeFilters(conf string) func(data MailContent) bool {
+// buildFilters 创建转发规则过滤器
+func buildFilters(conf string) func(data MailContent) bool {
 	if conf == "" {
 		return func(data MailContent) bool {
-			return false
+			return true
 		}
 	}
 
@@ -112,12 +112,16 @@ func buildExcludeFilters(conf string) func(data MailContent) bool {
 		panic(err)
 	}
 
-	var filters []ExcludeFilter
+	var filters []Filter
 	if err := yaml.Unmarshal(confData, &filters); err != nil {
 		panic(err)
 	}
 
 	return func(data MailContent) bool {
+		if len(filters) == 0 {
+			return true
+		}
+
 		for _, filter := range filters {
 			matched, err := pattern.Match(filter.Expr, data)
 			if err != nil {
@@ -137,14 +141,14 @@ func buildExcludeFilters(conf string) func(data MailContent) bool {
 	}
 }
 
-// ExcludeFilter 排除过滤器
-type ExcludeFilter struct {
+// Filter 过滤器
+type Filter struct {
 	Name string `yaml:"name,omitempty"`
 	Expr string `yaml:"expr"`
 }
 
 // buildMailHandler 创建邮件处理器
-func buildMailHandler(adanosServer []string, adanosToken string, tags []string, origin string, html2markdown bool, excludeFilter func(data MailContent) bool) func(origin net.Addr, from string, to []string, data []byte) {
+func buildMailHandler(adanosServer []string, adanosToken string, tags []string, origin string, html2markdown bool, filter func(data MailContent) bool) func(origin net.Addr, from string, to []string, data []byte) {
 	alerter := buildAdanosAlerter(adanosServer, adanosToken, tags, origin)
 	return func(origin net.Addr, from string, to []string, data []byte) {
 		msg, err := mail.ReadMessage(bytes.NewReader(data))
@@ -183,7 +187,7 @@ func buildMailHandler(adanosServer []string, adanosToken string, tags []string, 
 			Links:   extractLinks(string(body)),
 		}
 
-		if excludeFilter(mailContent) {
+		if !filter(mailContent) {
 			log.With(mailContent).Debug("event was dropped because exclude filter matched")
 			return
 		}
