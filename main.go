@@ -64,7 +64,7 @@ func main() {
 				Usage: "Adanos 事件来源标识",
 			},
 			&cli.StringFlag{
-				Name:  "fliters",
+				Name:  "filters",
 				Usage: "邮件转发规则配置文件，格式为 YAML，如果没有指定规则，则默认为全部转发",
 				Value: "",
 			},
@@ -134,7 +134,7 @@ func buildConfig(c *cli.Context) Config {
 		Tags:          c.StringSlice("tag"),
 		HTML2Markdown: c.Bool("html2md"),
 		Origin:        c.String("origin"),
-		FilterConf:    c.String("fliters"),
+		FilterConf:    c.String("filters"),
 		SMTPListen:    c.String("smtp-listen"),
 		RelayStrategy: c.String("relay-strategy"),
 		RelayHost:     c.String("relay-host"),
