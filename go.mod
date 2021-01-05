@@ -10,6 +10,7 @@ require (
 	github.com/mhale/smtpd v0.0.0-20200509114310-d7a07f752336
 	github.com/mylxsw/adanos-alert v0.0.0-20201013060641-707e27aed620
 	github.com/mylxsw/asteria v0.0.0-20200709071207-26dd334a6e51
+	github.com/mylxsw/go-utils v0.0.0-20201203034232-e340741582b4 // indirect
 	github.com/mylxsw/pattern v0.0.0-20201227150118-0f6c350665ad // indirect
 	github.com/pingcap/tipb v0.0.0-20201229060814-148bc717ce4c // indirect
 	github.com/tidwall/gjson v1.6.7 // indirect
@@ -18,4 +19,6 @@ require (
 	golang.org/x/sys v0.0.0-20210104204734-6f8348627aad // indirect
 	golang.org/x/text v0.3.4 // indirect
 	google.golang.org/protobuf v1.25.0 // indirect
+	gopkg.in/alexcesaro/quotedprintable.v3 v3.0.0-20150716171945-2caba252f4dc // indirect
+	gopkg.in/gomail.v2 v2.0.0-20160411212932-81ebce5c23df // indirect
 )

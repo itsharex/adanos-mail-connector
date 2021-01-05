@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"mime/quotedprintable"
@@ -18,8 +19,10 @@ import (
 	"github.com/mhale/smtpd"
 	"github.com/mylxsw/adanos-alert/pkg/connector"
 	"github.com/mylxsw/asteria/log"
+	"github.com/mylxsw/go-utils/str"
 	"github.com/mylxsw/pattern"
 	"github.com/urfave/cli"
+	"gopkg.in/gomail.v2"
 	"gopkg.in/yaml.v2"
 )
 
@@ -65,19 +68,39 @@ func main() {
 				Usage: "邮件转发规则配置文件，格式为 YAML，如果没有指定规则，则默认为全部转发",
 				Value: "",
 			},
+			&cli.StringFlag{
+				Name:  "relay-strategy",
+				Usage: "邮件转发策略：none/dropped/all",
+				Value: "none",
+			},
+			&cli.StringFlag{
+				Name:  "relay-host",
+				Usage: "邮件转发中继服务器主机地址",
+				Value: "",
+			},
+			&cli.IntFlag{
+				Name:  "relay-port",
+				Usage: "邮件转发中继服务器主机端口",
+				Value: 25,
+			},
+			&cli.StringFlag{
+				Name:  "relay-username",
+				Usage: "邮件转发中继服务器账号",
+				Value: "",
+			},
+			&cli.StringFlag{
+				Name:  "relay-password",
+				Usage: "邮件转发中继服务器密码",
+				Value: "",
+			},
+			&cli.BoolFlag{
+				Name:  "relay-ssl",
+				Usage: "邮件转发中继服务器是否使用 SSL",
+			},
 		},
 		Action: func(c *cli.Context) error {
-			adanosServers := c.StringSlice("adanos-server")
-			if len(adanosServers) == 0 {
-				adanosServers = append(adanosServers, "http://localhost:19999")
-			}
-
-			adanosToken := c.String("adanos-token")
-			tags := c.StringSlice("tag")
-			html2markdown := c.Bool("html2md")
-			origin := c.String("origin")
-
-			excludeFilter := buildFilters(c.String("fliters"))
+			conf := buildConfig(c)
+			excludeFilter := buildFilters(conf.FilterConf)
 
 			log.WithFields(log.Fields{
 				"version": Version,
@@ -85,8 +108,8 @@ func main() {
 			}).Debugf("adanos-mail-connector started")
 
 			return createSMTPServer(
-				c.String("smtp-listen"),
-				buildMailHandler(adanosServers, adanosToken, tags, origin, html2markdown, excludeFilter),
+				conf.SMTPListen,
+				buildMailHandler(conf, excludeFilter),
 				"mail-handler",
 				"",
 			)
@@ -99,12 +122,64 @@ func main() {
 	}
 }
 
+func buildConfig(c *cli.Context) Config {
+	adanosServers := c.StringSlice("adanos-server")
+	if len(adanosServers) == 0 {
+		adanosServers = append(adanosServers, "http://localhost:19999")
+	}
+
+	conf := Config{
+		AdanosServers: adanosServers,
+		AdanosToken:   c.String("adanos-token"),
+		Tags:          c.StringSlice("tag"),
+		HTML2Markdown: c.Bool("html2md"),
+		Origin:        c.String("origin"),
+		FilterConf:    c.String("fliters"),
+		SMTPListen:    c.String("smtp-listen"),
+		RelayStrategy: c.String("relay-strategy"),
+		RelayHost:     c.String("relay-host"),
+		RelayPort:     c.Int("relay-port"),
+		RelayUsername: c.String("relay-username"),
+		RelayPassword: c.String("relay-password"),
+		RelaySSL:      c.Bool("relay-ssl"),
+	}
+
+	if conf.RelayStrategy == "" {
+		conf.RelayStrategy = "none"
+	}
+
+	if !str.In(conf.RelayStrategy, []string{"none", "dropped", "all"}) {
+		panic(fmt.Errorf("invalid relay-strategy, only support none/dropped/all"))
+	}
+
+	return conf
+}
+
+// Config 配置对象
+type Config struct {
+	AdanosServers []string
+	AdanosToken   string
+	Tags          []string
+	HTML2Markdown bool
+	Origin        string
+	FilterConf    string
+	SMTPListen    string
+
+	RelayStrategy string
+	RelayHost     string
+	RelayPort     int
+	RelayUsername string
+	RelayPassword string
+	RelaySSL      bool
+}
+
 // createSMTPServer create a SMTP Server
 func createSMTPServer(addr string, handler smtpd.Handler, appname string, hostname string) error {
 	server := &smtpd.Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
 	server.AuthHandler = func(remoteAddr net.Addr, mechanism string, username, password, shared []byte) (bool, error) {
 		return true, nil
 	}
+	server.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 
 	return server.ListenAndServe()
 }
@@ -157,9 +232,37 @@ type Filter struct {
 	Expr string `yaml:"expr"`
 }
 
+func readBodyFromMessage(msg *mail.Message) (string, error) {
+	bodyReader := msg.Body
+	if msg.Header.Get("Content-Transfer-Encoding") == "quoted-printable" {
+		bodyReader = quotedprintable.NewReader(msg.Body)
+	}
+
+	body, err := ioutil.ReadAll(bodyReader)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}
+
 // buildMailHandler 创建邮件处理器
-func buildMailHandler(adanosServer []string, adanosToken string, tags []string, origin string, html2markdown bool, filter func(data MailContent) bool) func(origin net.Addr, from string, to []string, data []byte) {
-	alerter := buildAdanosAlerter(adanosServer, adanosToken, tags, origin)
+func buildMailHandler(conf Config, filter func(data MailContent) bool) func(origin net.Addr, from string, to []string, data []byte) {
+	alerter := buildAdanosAlerter(conf.AdanosServers, conf.AdanosToken, conf.Tags, conf.Origin)
+
+	var relayMailSend RelayMailSender
+
+	switch conf.RelayStrategy {
+	case "none":
+		relayMailSend = func(mailContent MailContent) error { return nil }
+	case "all":
+		fallthrough
+	case "dropped":
+		relayMailSend = buildRelayMailSender(conf)
+	default:
+		panic("invalid relay strategy")
+	}
+
 	return func(origin net.Addr, from string, to []string, data []byte) {
 		msg, err := mail.ReadMessage(bytes.NewReader(data))
 		if err != nil {
@@ -177,35 +280,48 @@ func buildMailHandler(adanosServer []string, adanosToken string, tags []string, 
 			log.Debugf("%s mail handled", msgID)
 		}()
 
-		bodyReader := msg.Body
-		if msg.Header.Get("Content-Transfer-Encoding") == "quoted-printable" {
-			bodyReader = quotedprintable.NewReader(msg.Body)
-		}
-
-		body, err := ioutil.ReadAll(bodyReader)
+		body, err := readBodyFromMessage(msg)
 		if err != nil {
 			log.Errorf("%s read body from body-reader failed: %v", msgID, err)
 			return
 		}
 
 		mailContent := MailContent{
+			msg:     msg,
 			Origin:  origin.String(),
 			ID:      strings.Trim(msgID, "<>"),
 			Subject: msg.Header.Get("Subject"),
 			From:    from,
 			To:      to,
-			Links:   extractLinks(string(body)),
+			Links:   extractLinks(body),
+			Body:    body,
 		}
 
-		if !filter(mailContent) {
+		matched := filter(mailContent)
+
+		relay := false
+		switch conf.RelayStrategy {
+		case "all":
+			relay = true
+		case "dropped":
+			if !matched {
+				relay = true
+			}
+		}
+
+		if relay {
+			if err := relayMailSend(mailContent); err != nil {
+				log.With(mailContent).Errorf("relay mail send failed: %v", err)
+			}
+		}
+
+		if !matched {
 			log.With(mailContent).Debug("event was dropped because exclude filter matched")
 			return
 		}
 
-		if html2markdown {
-			mailContent.Body = formatAsMarkdown(string(body))
-		} else {
-			mailContent.Body = string(body)
+		if conf.HTML2Markdown {
+			mailContent.Body = formatAsMarkdown(body)
 		}
 
 		log.With(mailContent).Debugf("%s mail received", msgID)
@@ -218,6 +334,7 @@ func buildMailHandler(adanosServer []string, adanosToken string, tags []string, 
 // MailContent 邮件内容对象
 type MailContent struct {
 	pattern.Helpers
+	msg     *mail.Message
 	ID      string            `json:"id"`
 	Origin  string            `json:"origin"`
 	Subject string            `json:"subject"`
@@ -277,4 +394,24 @@ func formatAsMarkdown(html string) string {
 	}
 
 	return markdown
+}
+
+// RelayMailSender 邮件转发中继
+type RelayMailSender func(mailContent MailContent) error
+
+// buildRelayMailSender 创建邮件转发中继
+func buildRelayMailSender(conf Config) RelayMailSender {
+	dialer := gomail.NewDialer(conf.RelayHost, conf.RelayPort, conf.RelayUsername, conf.RelayPassword)
+	dialer.SSL = conf.RelaySSL
+
+	return func(mailContent MailContent) error {
+		dst := gomail.NewMessage()
+		dst.SetBody(mailContent.msg.Header.Get("Content-Type"), mailContent.Body)
+		// dst.SetHeaders(mailContent.msg.Header)
+		dst.SetHeader("From", conf.RelayUsername)
+		dst.SetHeader("To", mailContent.To...)
+		dst.SetHeader("Subject", mailContent.Subject)
+
+		return dialer.DialAndSend(dst)
+	}
 }
