@@ -3,16 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io/ioutil"
-	"mime/quotedprintable"
 	"net"
-	"net/mail"
+	"net/smtp"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/DusanKasan/parsemail"
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/JohannesKaufmann/html-to-markdown/plugin"
 	"github.com/PuerkitoBio/goquery"
@@ -179,7 +178,12 @@ func createSMTPServer(addr string, handler smtpd.Handler, appname string, hostna
 	server.AuthHandler = func(remoteAddr net.Addr, mechanism string, username, password, shared []byte) (bool, error) {
 		return true, nil
 	}
-	server.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	server.AuthMechs = map[string]bool{
+		"LOGIN":    true,
+		"PLAIN":    true,
+		"CRAM-MD5": true,
+	}
+	//server.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 
 	return server.ListenAndServe()
 }
@@ -213,7 +217,7 @@ func buildFilters(conf string) func(data MailContent) bool {
 				log.WithFields(log.Fields{
 					"data":   data,
 					"filter": filter,
-				}).Errorf("pattern matche failed: %v", err)
+				}).Errorf("pattern match failed: %v", err)
 				continue
 			}
 
@@ -230,20 +234,6 @@ func buildFilters(conf string) func(data MailContent) bool {
 type Filter struct {
 	Name string `yaml:"name,omitempty"`
 	Expr string `yaml:"expr"`
-}
-
-func readBodyFromMessage(msg *mail.Message) (string, error) {
-	bodyReader := msg.Body
-	if msg.Header.Get("Content-Transfer-Encoding") == "quoted-printable" {
-		bodyReader = quotedprintable.NewReader(msg.Body)
-	}
-
-	body, err := ioutil.ReadAll(bodyReader)
-	if err != nil {
-		return "", err
-	}
-
-	return string(body), nil
 }
 
 // buildMailHandler 创建邮件处理器
@@ -264,7 +254,7 @@ func buildMailHandler(conf Config, filter func(data MailContent) bool) func(orig
 	}
 
 	return func(origin net.Addr, from string, to []string, data []byte) {
-		msg, err := mail.ReadMessage(bytes.NewReader(data))
+		msg, err := parsemail.Parse(bytes.NewReader(data))
 		if err != nil {
 			log.Errorf("read message from mail failed: %v", err)
 			return
@@ -280,21 +270,16 @@ func buildMailHandler(conf Config, filter func(data MailContent) bool) func(orig
 			log.Debugf("%s mail handled", msgID)
 		}()
 
-		body, err := readBodyFromMessage(msg)
-		if err != nil {
-			log.Errorf("%s read body from body-reader failed: %v", msgID, err)
-			return
-		}
-
 		mailContent := MailContent{
 			msg:     msg,
+			data:    data,
 			Origin:  origin.String(),
 			ID:      strings.Trim(msgID, "<>"),
-			Subject: msg.Header.Get("Subject"),
+			Subject: msg.Subject,
 			From:    from,
 			To:      to,
-			Links:   extractLinks(body),
-			Body:    body,
+			Links:   extractLinks(strings.Join([]string{msg.HTMLBody, msg.TextBody}, "\n")),
+			Body:    strings.Join([]string{msg.HTMLBody, msg.TextBody}, "\n"),
 		}
 
 		matched := filter(mailContent)
@@ -321,7 +306,7 @@ func buildMailHandler(conf Config, filter func(data MailContent) bool) func(orig
 		}
 
 		if conf.HTML2Markdown {
-			mailContent.Body = formatAsMarkdown(body)
+			mailContent.Body = formatAsMarkdown(msg.HTMLBody + msg.TextBody)
 		}
 
 		log.With(mailContent).Debugf("%s mail received", msgID)
@@ -334,7 +319,8 @@ func buildMailHandler(conf Config, filter func(data MailContent) bool) func(orig
 // MailContent 邮件内容对象
 type MailContent struct {
 	pattern.Helpers
-	msg     *mail.Message
+	msg     parsemail.Email
+	data    []byte
 	ID      string            `json:"id"`
 	Origin  string            `json:"origin"`
 	Subject string            `json:"subject"`
@@ -376,7 +362,10 @@ func extractLinks(body string) map[string]string {
 	doc.Find("a").Each(func(i int, s *goquery.Selection) {
 		linkURL := s.AttrOr("href", "")
 		if strings.HasPrefix(linkURL, "http://") || strings.HasPrefix(linkURL, "https://") {
-			links[s.Text()] = linkURL
+			title := strings.TrimSpace(s.Text())
+			if title != "" {
+				links[title] = linkURL
+			}
 		}
 	})
 
@@ -405,13 +394,57 @@ func buildRelayMailSender(conf Config) RelayMailSender {
 	dialer.SSL = conf.RelaySSL
 
 	return func(mailContent MailContent) error {
-		dst := gomail.NewMessage()
-		dst.SetBody(mailContent.msg.Header.Get("Content-Type"), mailContent.Body)
-		// dst.SetHeaders(mailContent.msg.Header)
-		dst.SetHeader("From", conf.RelayUsername)
-		dst.SetHeader("To", mailContent.To...)
-		dst.SetHeader("Subject", mailContent.Subject)
+		return smtp.SendMail(
+			fmt.Sprintf("%s:%d", conf.RelayHost, conf.RelayPort),
+			&loginAuth{
+				username: conf.RelayUsername,
+				password: conf.RelayPassword,
+				host:     conf.RelayHost,
+			},
+			conf.RelayUsername,
+			mailContent.To,
+			mailContent.data,
+		)
+	}
+}
 
-		return dialer.DialAndSend(dst)
+// loginAuth is an smtp.Auth that implements the LOGIN authentication mechanism.
+type loginAuth struct {
+	username string
+	password string
+	host     string
+}
+
+func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	if !server.TLS {
+		advertised := false
+		for _, mechanism := range server.Auth {
+			if mechanism == "LOGIN" {
+				advertised = true
+				break
+			}
+		}
+		if !advertised {
+			return "", nil, fmt.Errorf("gomail: unencrypted connection")
+		}
+	}
+	if server.Name != a.host {
+		return "", nil, fmt.Errorf("gomail: wrong host name")
+	}
+	return "LOGIN", nil, nil
+}
+
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+
+	switch {
+	case bytes.Equal(fromServer, []byte("Username:")):
+		return []byte(a.username), nil
+	case bytes.Equal(fromServer, []byte("Password:")):
+		return []byte(a.password), nil
+	default:
+		return nil, fmt.Errorf("gomail: unexpected server challenge: %s", fromServer)
 	}
 }

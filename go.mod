@@ -3,6 +3,7 @@ module github.com/mylxsw/adanos-mail-connector
 go 1.14
 
 require (
+	github.com/DusanKasan/parsemail v1.2.0 // indirect
 	github.com/JohannesKaufmann/html-to-markdown v1.2.0
 	github.com/PuerkitoBio/goquery v1.6.0
 	github.com/andybalholm/cascadia v1.2.0 // indirect
