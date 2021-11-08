@@ -394,17 +394,31 @@ func buildRelayMailSender(conf Config) RelayMailSender {
 	dialer.SSL = conf.RelaySSL
 
 	return func(mailContent MailContent) error {
-		return smtp.SendMail(
-			fmt.Sprintf("%s:%d", conf.RelayHost, conf.RelayPort),
-			&loginAuth{
-				username: conf.RelayUsername,
-				password: conf.RelayPassword,
-				host:     conf.RelayHost,
-			},
-			conf.RelayUsername,
-			mailContent.To,
-			mailContent.data,
-		)
+		tos := make([]string, 0)
+		for _, t := range mailContent.msg.To {
+			tos = append(tos, t.Address)
+		}
+
+		ccs := make([]string, 0)
+		for _, t := range mailContent.msg.Cc {
+			ccs = append(ccs, t.Address)
+		}
+
+		message := gomail.NewMessage()
+		message.SetHeader("From", conf.RelayUsername)
+		message.SetHeader("To", tos...)
+		message.SetHeader("Subject", mailContent.msg.Subject)
+		if len(ccs) > 0 {
+			message.SetHeader("Cc", ccs...)
+		}
+
+		if mailContent.msg.HTMLBody == "" {
+			message.SetBody(mailContent.msg.ContentType, mailContent.msg.TextBody)
+		} else {
+			message.SetBody(mailContent.msg.ContentType, mailContent.msg.HTMLBody)
+		}
+
+		return dialer.DialAndSend(message)
 	}
 }
 
